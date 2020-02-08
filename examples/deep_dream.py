@@ -1,11 +1,12 @@
-'''Deep Dreaming in Keras.
+'''
+#Deep Dreaming in Keras.
 
 Run the script with:
-```
+```python
 python deep_dream.py path_to_your_base_image.jpg prefix_for_results
 ```
 e.g.:
-```
+```python
 python deep_dream.py img/mypic.jpg results/dream
 ```
 '''
@@ -83,16 +84,16 @@ layer_dict = dict([(layer.name, layer) for layer in model.layers])
 loss = K.variable(0.)
 for layer_name in settings['features']:
     # Add the L2 norm of the features of a layer to the loss.
-    assert (layer_name in layer_dict.keys(),
-            'Layer ' + layer_name + ' not found in model.')
+    if layer_name not in layer_dict:
+        raise ValueError('Layer ' + layer_name + ' not found in model.')
     coeff = settings['features'][layer_name]
     x = layer_dict[layer_name].output
     # We avoid border artifacts by only involving non-border pixels in the loss.
     scaling = K.prod(K.cast(K.shape(x), 'float32'))
     if K.image_data_format() == 'channels_first':
-        loss += coeff * K.sum(K.square(x[:, :, 2: -2, 2: -2])) / scaling
+        loss = loss + coeff * K.sum(K.square(x[:, :, 2: -2, 2: -2])) / scaling
     else:
-        loss += coeff * K.sum(K.square(x[:, 2: -2, 2: -2, :])) / scaling
+        loss = loss + coeff * K.sum(K.square(x[:, 2: -2, 2: -2, :])) / scaling
 
 # Compute the gradients of the dream wrt the loss.
 grads = K.gradients(loss, dream)[0]

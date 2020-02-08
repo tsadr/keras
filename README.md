@@ -22,12 +22,26 @@ Keras is compatible with: __Python 2.7-3.6__.
 
 ------------------
 
+## Multi-backend Keras and tf.keras:
+
+**At this time, we recommend that Keras users who use multi-backend Keras with the TensorFlow backend switch to `tf.keras` in TensorFlow 2.0**. `tf.keras` is better maintained and has better integration with TensorFlow features (eager execution, distribution support and other).
+
+Keras 2.2.5 was the last release of Keras implementing the 2.2.* API. It was the last release to only support TensorFlow 1 (as well as Theano and CNTK).
+
+The current release is Keras 2.3.0, which makes significant API changes and add support for TensorFlow 2.0. The 2.3.0 release will be the last major release of multi-backend Keras. Multi-backend Keras is superseded by `tf.keras`.
+
+Bugs present in multi-backend Keras will only be fixed until April 2020 (as part of minor releases).
+
+For more information about the future of Keras, see [the Keras meeting notes](http://bit.ly/keras-meeting-notes).
+
+
+------------------
 
 ## Guiding principles
 
 - __User friendliness.__ Keras is an API designed for human beings, not machines. It puts user experience front and center. Keras follows best practices for reducing cognitive load: it offers consistent & simple APIs, it minimizes the number of user actions required for common use cases, and it provides clear and actionable feedback upon user error.
 
-- __Modularity.__ A model is understood as a sequence or a graph of standalone, fully-configurable modules that can be plugged together with as few restrictions as possible. In particular, neural layers, cost functions, optimizers, initialization schemes, activation functions, regularization schemes are all standalone modules that you can combine to create new models.
+- __Modularity.__ A model is understood as a sequence or a graph of standalone, fully configurable modules that can be plugged together with as few restrictions as possible. In particular, neural layers, cost functions, optimizers, initialization schemes, activation functions and regularization schemes are all standalone modules that you can combine to create new models.
 
 - __Easy extensibility.__ New modules are simple to add (as new classes and functions), and existing modules provide ample examples. To be able to easily create new modules allows for total expressiveness, making Keras suitable for advanced research.
 
@@ -127,6 +141,9 @@ You may also consider installing the following **optional dependencies**:
 Then, you can install Keras itself. There are two ways to install Keras:
 
 - **Install Keras from PyPI (recommended):**
+
+Note: These installation steps assume that you are on a Linux or Mac environment.
+If you are on Windows, you will need to remove `sudo` to run the commands below.
 
 ```sh
 sudo pip install keras

@@ -6,10 +6,12 @@ import pandas as pd
 from numpy.testing import assert_allclose
 import sys
 import scipy.sparse as sparse
+from flaky import flaky
 
 import keras
 from keras import losses
-from keras.layers import Activation, Dense, Dropout, Conv2D, Concatenate
+from keras import metrics
+from keras.layers import Layer, Activation, Dense, Dropout, Conv2D, Concatenate
 from keras.engine import Input
 from keras.engine.training import Model
 from keras.engine import training_utils
@@ -17,7 +19,10 @@ from keras.utils.generic_utils import slice_arrays
 from keras.models import Sequential
 from keras import backend as K
 from keras.utils import Sequence
-from keras.callbacks import LambdaCallback
+from keras.callbacks import Callback
+
+if K.backend() == 'tensorflow':
+    import tensorflow as tf
 
 
 class RandomSequence(Sequence):
@@ -38,6 +43,28 @@ class RandomSequence(Sequence):
 
     def on_epoch_end(self):
         pass
+
+
+class IncreaseBatchSizeRandomSequence(Sequence):
+    def __init__(self, initial_batch_size, initial_sequence_length=12,
+                 batch_size_func=lambda x: x + 2):
+        self.batch_size = initial_batch_size
+        self.initial_sequence_length = initial_sequence_length
+        self.batch_size_func = batch_size_func
+        self.logs = []
+
+    def __len__(self):
+        return int(np.ceil(self.initial_sequence_length / float(self.batch_size)))
+
+    def __getitem__(self, idx):
+        self.logs.append(idx)
+        return ([np.random.random((self.batch_size, 3)),
+                 np.random.random((self.batch_size, 3))],
+                [np.random.random((self.batch_size, 4)),
+                 np.random.random((self.batch_size, 3))])
+
+    def on_epoch_end(self):
+        self.batch_size = self.batch_size_func(self.batch_size)
 
 
 class threadsafe_iter:
@@ -123,7 +150,7 @@ def test_weighted_masked_objective():
     weighted_function(a, a, None)
 
 
-def test_model_methods():
+def get_model(num_outputs=1):
     a = Input(shape=(3,), name='input_a')
     b = Input(shape=(3,), name='input_b')
 
@@ -131,7 +158,38 @@ def test_model_methods():
     dp = Dropout(0.5, name='dropout')
     b_2 = dp(b)
 
-    model = Model([a, b], [a_2, b_2])
+    if num_outputs == 1:
+        model = Model([a, b], a_2)
+    else:
+        model = Model([a, b], [a_2, b_2])
+    return model
+
+
+class TrackerCallback(Callback):
+
+    def __init__(self):
+        # test starting from non-zero initial epoch
+        self.trained_epochs = []
+        self.trained_batches = []
+        self.steps_per_epoch_log = []
+        super(TrackerCallback, self).__init__()
+
+    def set_params(self, params):
+        super(TrackerCallback, self).set_params(params)
+        self.steps_per_epoch_log.append(params['steps'])
+
+    # define tracer callback
+    def on_epoch_begin(self, epoch, logs):
+        self.trained_epochs.append(epoch)
+
+    def on_batch_begin(self, batch, logs):
+        self.trained_batches.append(batch)
+
+
+# TODO: resolve flakyness issue. Tracked with #11560
+@flaky(rerun_filter=lambda err, *args: issubclass(err[0], AssertionError))
+def test_model_methods():
+    model = get_model(num_outputs=2)
 
     optimizer = 'rmsprop'
     loss = 'mse'
@@ -269,27 +327,15 @@ def test_model_methods():
                               [output_a_np, output_b_np])
     assert len(out) == 4
 
-    # test starting from non-zero initial epoch
-    trained_epochs = []
-    trained_batches = []
-
-    # define tracer callback
-    def on_epoch_begin(epoch, logs):
-        trained_epochs.append(epoch)
-
-    def on_batch_begin(batch, logs):
-        trained_batches.append(batch)
-
-    tracker_cb = LambdaCallback(on_epoch_begin=on_epoch_begin,
-                                on_batch_begin=on_batch_begin)
+    tracker_cb = TrackerCallback()
 
     out = model.fit([input_a_np, input_b_np],
                     [output_a_np, output_b_np], epochs=5, batch_size=4,
                     initial_epoch=2, callbacks=[tracker_cb])
-    assert trained_epochs == [2, 3, 4]
+    assert tracker_cb.trained_epochs == [2, 3, 4]
 
     # test starting from non-zero initial epoch for generator too
-    trained_epochs = []
+    tracker_cb = TrackerCallback()
 
     @threadsafe_generator
     def gen_data(batch_sz):
@@ -301,7 +347,7 @@ def test_model_methods():
 
     out = model.fit_generator(gen_data(4), steps_per_epoch=3, epochs=5,
                               initial_epoch=2, callbacks=[tracker_cb])
-    assert trained_epochs == [2, 3, 4]
+    assert tracker_cb.trained_epochs == [2, 3, 4]
 
     # test with a custom metric function
     def mse(y_true, y_pred):
@@ -334,6 +380,9 @@ def test_model_methods():
 
     # enable verbose for evaluate_generator
     out = model.evaluate_generator(gen_data(4), steps=3, verbose=1)
+    # pass generator directly so `is_generator_or_sequence`
+    # doesn't get confused.
+    out = model.evaluate(gen_data(4).it, steps=3, verbose=1)
 
     # empty batch
     with pytest.raises(ValueError):
@@ -343,6 +392,13 @@ def test_model_methods():
                 yield (np.asarray([]), np.asarray([]))
 
         out = model.evaluate_generator(gen_data(), steps=1)
+    with pytest.raises(ValueError):
+        @threadsafe_generator
+        def gen_data():
+            while True:
+                yield (np.asarray([]), np.asarray([]))
+
+        out = model.evaluate(gen_data().it, steps=1)
 
     # x is not a list of numpy arrays.
     with pytest.raises(ValueError):
@@ -438,10 +494,18 @@ def test_model_methods():
                                    [output_a_np, output_b_np],
                                    sample_weight=sample_weight)
 
+
+# TODO: resolve flakyness issue. Tracked with #11560
+@flaky(rerun_filter=lambda err, *args: issubclass(err[0], AssertionError))
+def test_fit_generator():
+    model = get_model(num_outputs=2)
+    optimizer = 'rmsprop'
+    loss = 'mse'
+    loss_weights = [1., 0.5]
+
     model.compile(optimizer, loss, metrics=[], loss_weights=loss_weights,
                   sample_weight_mode=None)
-    trained_epochs = []
-    trained_batches = []
+    tracker_cb = TrackerCallback()
     val_seq = RandomSequence(4)
     out = model.fit_generator(generator=RandomSequence(3),
                               steps_per_epoch=3,
@@ -451,22 +515,74 @@ def test_model_methods():
                               validation_steps=3,
                               max_queue_size=1,
                               callbacks=[tracker_cb])
-    assert trained_epochs == [0, 1, 2, 3, 4]
-    assert trained_batches == list(range(3)) * 5
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == list(range(3)) * 5
+    assert len(val_seq.logs) <= 4 * 5
+
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    out = model.fit(RandomSequence(3),
+                    steps_per_epoch=3,
+                    epochs=5,
+                    initial_epoch=0,
+                    validation_data=val_seq,
+                    validation_steps=3,
+                    max_queue_size=1,
+                    callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == list(range(3)) * 5
     assert len(val_seq.logs) <= 4 * 5
 
     # steps_per_epoch will be equal to len of sequence if it's unspecified
-    trained_epochs = []
-    trained_batches = []
+    tracker_cb = TrackerCallback()
     val_seq = RandomSequence(4)
     out = model.fit_generator(generator=RandomSequence(3),
                               epochs=5,
                               initial_epoch=0,
                               validation_data=val_seq,
-                              callbacks=[tracker_cb])
-    assert trained_epochs == [0, 1, 2, 3, 4]
-    assert trained_batches == list(range(12)) * 5
+                              callbacks=[tracker_cb],
+                              max_queue_size=1)
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == list(range(12)) * 5
+    assert 12 * 5 <= len(val_seq.logs) <= (12 * 5) + 2  # the queue may be full.
+
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    out = model.fit(RandomSequence(3),
+                    epochs=5,
+                    initial_epoch=0,
+                    validation_data=val_seq,
+                    callbacks=[tracker_cb],
+                    max_queue_size=1)
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == list(range(12)) * 5
+    assert 12 * 5 <= len(val_seq.logs) <= (12 * 5) + 2  # the queue may be full.
+
+    # test for workers = 0
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    out = model.fit_generator(generator=RandomSequence(3),
+                              epochs=5,
+                              validation_data=val_seq,
+                              callbacks=[tracker_cb],
+                              workers=0)
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == list(range(12)) * 5
     assert len(val_seq.logs) == 12 * 5
+
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    out = model.fit(RandomSequence(3),
+                    steps_per_epoch=3,
+                    epochs=5,
+                    initial_epoch=0,
+                    validation_data=val_seq,
+                    validation_steps=3,
+                    max_queue_size=1,
+                    callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == list(range(3)) * 5
+    assert len(val_seq.logs) <= 4 * 5
 
     # fit_generator will throw an exception
     # if steps is unspecified for regular generator
@@ -516,15 +632,153 @@ def test_model_methods():
     # of the queue depends on sleep in the enqueuers
     assert 3 <= gen_counters[0] <= 12
 
+
+def test_fit_generator_dynamic_size_sequence_with_workers():
+    model = get_model(num_outputs=2)
+    optimizer = 'rmsprop'
+    loss = 'mse'
+    loss_weights = [1., 0.5]
+
+    model.compile(optimizer, loss, metrics=[], loss_weights=loss_weights,
+                  sample_weight_mode=None)
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    train_seq = IncreaseBatchSizeRandomSequence(3, 20)
+    out = model.fit_generator(generator=train_seq,
+                              epochs=5,
+                              initial_epoch=0,
+                              validation_data=val_seq,
+                              validation_steps=3,
+                              max_queue_size=1,
+                              callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == [
+        0, 1, 2, 3, 4, 5, 6,  # 1st epoch -> ceil(20 / 3) = 7 batches
+        0, 1, 2, 3,           # 2nd epoch -> ceil(20 / 5) = 4 batches
+        0, 1, 2,              # 3d  epoch -> ceil(20 / 7) = 3 batches
+        0, 1, 2,              # 4th epoch -> ceil(20 / 9) = 3 batches
+        0, 1,                 # 5th epoch -> ceil(20 /11) = 2 batches
+    ]
+    assert tracker_cb.steps_per_epoch_log[0:5] == [7, 4, 3, 3, 2]
+
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    train_seq = IncreaseBatchSizeRandomSequence(3, 30)
+    out = model.fit_generator(generator=train_seq,
+                              epochs=5,
+                              initial_epoch=0,
+                              validation_data=val_seq,
+                              validation_steps=3,
+                              max_queue_size=1,
+                              callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9,  # 1st epoch -> ceil(30 / 3) = 10 batches
+        0, 1, 2, 3, 4, 5,              # 2nd epoch -> ceil(30 / 5) =  6 batches
+        0, 1, 2, 3, 4,                 # 3d  epoch -> ceil(30 / 7) =  5 batches
+        0, 1, 2, 3,                    # 4th epoch -> ceil(30 / 9) =  4 batches
+        0, 1, 2,                       # 5th epoch -> ceil(30 /11) =  3 batches
+    ]
+    assert tracker_cb.steps_per_epoch_log[0:5] == [10, 6, 5, 4, 3]
+
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    train_seq = IncreaseBatchSizeRandomSequence(2, 404, lambda x: x * 2)
+    out = model.fit_generator(generator=train_seq,
+                              epochs=5,
+                              initial_epoch=0,
+                              validation_data=val_seq,
+                              validation_steps=3,
+                              max_queue_size=1,
+                              callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    # number of trained batches should match sum of steps per each epoch
+    assert len(tracker_cb.trained_batches) == 202 + 101 + 51 + 26 + 13
+    assert tracker_cb.steps_per_epoch_log[0:5] == [202, 101, 51, 26, 13]
+
+
+def test_fit_generator_dynamic_size_sequence_main_thread():
+    model = get_model(num_outputs=2)
+    optimizer = 'rmsprop'
+    loss = 'mse'
+    loss_weights = [1., 0.5]
+
+    model.compile(optimizer, loss, metrics=[], loss_weights=loss_weights,
+                  sample_weight_mode=None)
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    train_seq = IncreaseBatchSizeRandomSequence(3, 20)
+    out = model.fit_generator(generator=train_seq,
+                              epochs=5,
+                              initial_epoch=0,
+                              validation_data=val_seq,
+                              validation_steps=3,
+                              workers=0,
+                              callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == [
+        0, 1, 2, 3, 4, 5, 6,  # 1st epoch -> ceil(20 / 3) = 7 batches
+        0, 1, 2, 3,           # 2nd epoch -> ceil(20 / 5) = 4 batches
+        0, 1, 2,              # 3d  epoch -> ceil(20 / 7) = 3 batches
+        0, 1, 2,              # 4th epoch -> ceil(20 / 9) = 3 batches
+        0, 1,                 # 5th epoch -> ceil(20 /11) = 2 batches
+    ]
+    assert tracker_cb.steps_per_epoch_log[0:5] == [7, 4, 3, 3, 2]
+
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    train_seq = IncreaseBatchSizeRandomSequence(3, 30)
+    out = model.fit_generator(generator=train_seq,
+                              epochs=5,
+                              initial_epoch=0,
+                              validation_data=val_seq,
+                              validation_steps=3,
+                              workers=0,
+                              callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    assert tracker_cb.trained_batches == [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9,  # 1st epoch -> ceil(30 / 3) = 10 batches
+        0, 1, 2, 3, 4, 5,              # 2nd epoch -> ceil(30 / 5) =  6 batches
+        0, 1, 2, 3, 4,                 # 3d  epoch -> ceil(30 / 7) =  5 batches
+        0, 1, 2, 3,                    # 4th epoch -> ceil(30 / 9) =  4 batches
+        0, 1, 2,                       # 5th epoch -> ceil(30 /11) =  3 batches
+    ]
+    assert tracker_cb.steps_per_epoch_log[0:5] == [10, 6, 5, 4, 3]
+
+    tracker_cb = TrackerCallback()
+    val_seq = RandomSequence(4)
+    train_seq = IncreaseBatchSizeRandomSequence(2, 404, lambda x: x * 2)
+    out = model.fit_generator(generator=train_seq,
+                              epochs=5,
+                              initial_epoch=0,
+                              validation_data=val_seq,
+                              validation_steps=3,
+                              workers=0,
+                              callbacks=[tracker_cb])
+    assert tracker_cb.trained_epochs == [0, 1, 2, 3, 4]
+    # number of trained batches should match sum of steps per each epoch
+    assert len(tracker_cb.trained_batches) == 202 + 101 + 51 + 26 + 13
+    assert tracker_cb.steps_per_epoch_log[0:5] == [202, 101, 51, 26, 13]
+
+
+def test_fit_generator_shape():
     # predict_generator output shape behavior should be consistent
     def expected_shape(batch_size, n_batches):
         return (batch_size * n_batches, 4), (batch_size * n_batches, 3)
+
+    model = get_model(num_outputs=2)
+    optimizer = 'rmsprop'
+    loss = 'mse'
 
     # Multiple outputs and one step.
     batch_size = 5
     sequence_length = 1
     shape_0, shape_1 = expected_shape(batch_size, sequence_length)
     out = model.predict_generator(
+        RandomSequence(batch_size, sequence_length=sequence_length))
+    assert np.shape(out[0]) == shape_0 and np.shape(out[1]) == shape_1
+
+    out = model.predict(
         RandomSequence(batch_size, sequence_length=sequence_length))
     assert np.shape(out[0]) == shape_0 and np.shape(out[1]) == shape_1
 
@@ -536,8 +790,12 @@ def test_model_methods():
         RandomSequence(batch_size, sequence_length=sequence_length))
     assert np.shape(out[0]) == shape_0 and np.shape(out[1]) == shape_1
 
+    out = model.predict(
+        RandomSequence(batch_size, sequence_length=sequence_length))
+    assert np.shape(out[0]) == shape_0 and np.shape(out[1]) == shape_1
+
     # Create a model with a single output.
-    single_output_model = Model([a, b], a_2)
+    single_output_model = get_model(num_outputs=1)
     single_output_model.compile(optimizer, loss,
                                 metrics=[], sample_weight_mode=None)
 
@@ -549,6 +807,10 @@ def test_model_methods():
         RandomSequence(batch_size, sequence_length=sequence_length))
     assert np.shape(out) == shape_0
 
+    out = single_output_model.predict(
+        RandomSequence(batch_size, sequence_length=sequence_length))
+    assert np.shape(out) == shape_0
+
     # Single output and multiple steps.
     batch_size = 5
     sequence_length = 2
@@ -557,10 +819,43 @@ def test_model_methods():
         RandomSequence(batch_size, sequence_length=sequence_length))
     assert np.shape(out) == shape_0
 
+    out = single_output_model.predict(
+        RandomSequence(batch_size, sequence_length=sequence_length))
+    assert np.shape(out) == shape_0
+
+
+def test_training_with_loss_instance():
+    a = Input(shape=(3,), name='input_a')
+    b = Input(shape=(3,), name='input_b')
+
+    dense = Dense(4, name='dense')
+    c = dense(a)
+    d = dense(b)
+    e = Dropout(0.5, name='dropout')(c)
+
+    model = Model([a, b], [d, e])
+    loss_weights = [1., 0.5]
+    model.compile(
+        'sgd',
+        loss=losses.MeanSquaredError(),
+        metrics=['mae'],
+        loss_weights=loss_weights)
+
+    input_a_np = np.random.random((10, 3))
+    input_b_np = np.random.random((10, 3))
+
+    output_d_np = np.random.random((10, 4))
+    output_e_np = np.random.random((10, 4))
+
+    model.fit([input_a_np, input_b_np], [output_d_np, output_e_np],
+              epochs=1,
+              batch_size=5)
+
 
 @pytest.mark.skipif(sys.version_info < (3,),
                     reason='Cannot catch warnings in python 2')
-def test_warnings():
+def DISABLED_test_warnings():
+    """This test hangs Travis."""
     a = Input(shape=(3,), name='input_a')
     b = Input(shape=(3,), name='input_b')
 
@@ -601,6 +896,8 @@ def test_warnings():
         'A warning was raised for Sequence.')
 
 
+@pytest.mark.skipif(K.backend() == 'tensorflow',
+                    reason='Must for for tf.keras to support sparse ops.')
 def test_sparse_inputs_targets():
     test_inputs = [sparse.random(6, 3, density=0.25).tocsr() for _ in range(2)]
     test_outputs = [sparse.random(6, i, density=0.25).tocsr() for i in range(3, 5)]
@@ -618,7 +915,8 @@ def test_sparse_inputs_targets():
 
 @pytest.mark.skipif(K.backend() != 'tensorflow',
                     reason='sparse operations supported only by TensorFlow')
-def test_sparse_placeholder_fit():
+def DISABLED_test_sparse_placeholder_fit():
+    """Must wait for tf.keras to support sparse operations."""
     test_inputs = [sparse.random(6, 3, density=0.25).tocsr() for _ in range(2)]
     test_outputs = [sparse.random(6, i, density=0.25).tocsr() for i in range(3, 5)]
     in1 = Input(shape=(3,))
@@ -676,20 +974,18 @@ def test_check_not_failing():
 
 def test_check_last_is_one():
     a = np.random.random((2, 3, 1))
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ValueError,
+                       match='You are passing a target array'):
         training_utils.check_loss_and_target_compatibility(
-            [a], [losses.categorical_crossentropy], [a.shape])
-
-    assert 'You are passing a target array' in str(exc)
+            [a], [losses.CategoricalCrossentropy()], [a.shape])
 
 
 def test_check_bad_shape():
     a = np.random.random((2, 3, 5))
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ValueError,
+                       match='targets to have the same shape'):
         training_utils.check_loss_and_target_compatibility(
-            [a], [losses.categorical_crossentropy], [(2, 3, 6)])
-
-    assert 'targets to have the same shape' in str(exc)
+            [a], [losses.CategoricalCrossentropy()], [(2, 3, 6)])
 
 
 @pytest.mark.skipif(K.backend() != 'tensorflow',
@@ -961,6 +1257,7 @@ def test_model_with_external_loss():
 
         # test evaluate_generator for framework-native data tensors
         out = model.evaluate_generator(generator, steps=3)
+        out = model.evaluate(generator, steps=3)
 
         # test fit with validation data
         with pytest.raises(ValueError):
@@ -1088,12 +1385,12 @@ def test_target_tensors():
     # multi-output, not enough target tensors when `target_tensors` is not a dict
     with pytest.raises(ValueError,
                        match='When passing a list as `target_tensors`, it should '
-                             'have one entry per model output. The model has \d '
+                             'have one entry per model output. The model has \\d '
                              'outputs, but you passed target_tensors='):
         model.compile(optimizer='rmsprop', loss='mse',
                       target_tensors=[target_a])
     with pytest.raises(ValueError,
-                       match='The model has \d outputs, but you passed a single '
+                       match='The model has \\d outputs, but you passed a single '
                              'tensor as `target_tensors`. Expected a list or '
                              'a dict of tensors.'):
         model.compile(optimizer='rmsprop', loss='mse',
@@ -1106,6 +1403,9 @@ def test_target_tensors():
                          sample_weight={'dense_a': np.random.random((10,))})
 
 
+@pytest.mark.skipif(K.backend() == 'tensorflow' and
+                    tf.__version__.startswith('2'),
+                    reason='Cannot have tensors as dict keys in TF2')
 def test_model_custom_target_tensors():
     a = Input(shape=(3,), name='input_a')
     b = Input(shape=(3,), name='input_b')
@@ -1157,14 +1457,12 @@ def test_model_custom_target_tensors():
                                {y: np.random.random((10, 4)),
                                 y1: np.random.random((10, 3))})
 
-    if K.backend() == 'tensorflow':
-        import tensorflow as tf
-        # test with custom TF placeholder as target
-        pl_target_a = tf.placeholder('float32', shape=(None, 4))
-        model.compile(optimizer='rmsprop', loss='mse',
-                      target_tensors={'dense_1': pl_target_a})
-        model.train_on_batch([input_a_np, input_b_np],
-                             [output_a_np, output_b_np])
+    # test with custom placeholder as target
+    pl_target_a = K.placeholder(shape=(None, 4))
+    model.compile(optimizer='rmsprop', loss='mse',
+                  target_tensors={'dense_1': pl_target_a})
+    model.train_on_batch([input_a_np, input_b_np],
+                         [output_a_np, output_b_np])
 
 
 @pytest.mark.skipif(sys.version_info < (3,),
@@ -1291,10 +1589,6 @@ def test_pandas_dataframe():
 
 
 @pytest.mark.skipif(K.backend() != 'tensorflow', reason='Requires TensorFlow')
-@pytest.mark.skipif((K.backend() == 'tensorflow' and
-                     not hasattr(K.get_session(),
-                                 '_make_callable_from_options')),
-                    reason='Requires TF 1.8 or higher')
 def test_training_and_eval_methods_on_symbolic_tensors_single_io():
     x = keras.layers.Input(shape=(3,), name='input')
     y = keras.layers.Dense(4, name='dense')(x)
@@ -1319,10 +1613,6 @@ def test_training_and_eval_methods_on_symbolic_tensors_single_io():
 
 
 @pytest.mark.skipif(K.backend() != 'tensorflow', reason='Requires TensorFlow')
-@pytest.mark.skipif((K.backend() == 'tensorflow' and
-                     not hasattr(K.get_session(),
-                                 '_make_callable_from_options')),
-                    reason='Requires TF 1.8 or higher')
 def test_training_and_eval_methods_on_symbolic_tensors_multi_io():
     a = keras.layers.Input(shape=(3,), name='input_a')
     b = keras.layers.Input(shape=(3,), name='input_b')
@@ -1351,13 +1641,14 @@ def test_training_and_eval_methods_on_symbolic_tensors_multi_io():
         epochs=1,
         steps_per_epoch=2,
         verbose=0)
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(ValueError,
+                       match='should specify the `steps_per_epoch`'):
         model.fit(
             [input_a_tf, input_b_tf], [output_d_tf, output_e_tf],
             epochs=1,
             batch_size=5,
             verbose=0)
-    assert 'should specify the `steps_per_epoch`' in str(excinfo.value)
+
     model.train_on_batch([input_a_tf, input_b_tf], [output_d_tf, output_e_tf])
 
     # Test with dictionary inputs
@@ -1398,7 +1689,8 @@ def test_training_and_eval_methods_on_symbolic_tensors_multi_io():
         validation_steps=2,
         verbose=0)
     # Test with validation split
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(ValueError,
+                       match='you cannot use `validation_split`'):
         model.fit(
             [input_a_tf, input_b_tf], [output_d_tf, output_e_tf],
             epochs=2,
@@ -1406,7 +1698,6 @@ def test_training_and_eval_methods_on_symbolic_tensors_multi_io():
             verbose=0,
             validation_split=0.2,
             validation_steps=2)
-    assert 'you cannot use `validation_split`' in str(excinfo.value)
 
     # Test evaluation / prediction methods
     model.evaluate([input_a_tf, input_b_tf], [output_d_tf, output_e_tf],
@@ -1482,6 +1773,7 @@ def test_model_with_crossentropy_losses_channels_first():
     # Evaluate the same network with channels first, with all three loss
     # functions:
     K.set_image_data_format('channels_first')
+    assert K.image_data_format() == 'channels_first'
     data = data_channels_first
     for index, loss_function in enumerate(losses_to_test):
         labels = labels_channels_first[index]
@@ -1531,6 +1823,319 @@ def test_dynamic_set_inputs():
     preds4 = model4.predict([np.random.random((1, 32)),
                              np.random.random((1, 5))])
     assert preds4.shape == (1, 19)
+
+
+def test_sample_weights():
+    y = np.array([0, 1, 0, 0, 2])
+    sample_weights = np.array([0.5, 1., 1., 0., 2.])
+    class_weights = {0: 0.5, 1: 1., 2: 1.5}
+
+    # Only `sample_weights`.
+    weights = training_utils.standardize_weights(y, sample_weights)
+    assert np.allclose(weights, sample_weights)
+
+    # Only `class_weights`.
+    weights = training_utils.standardize_weights(y, class_weight=class_weights)
+    assert np.allclose(weights, np.array([0.5, 1., 0.5, 0.5, 1.5]))
+
+    # Both 'sample_weights` and 'class_weights`.
+    weights = training_utils.standardize_weights(y, sample_weights,
+                                                 class_weights)
+    expected = sample_weights * np.array([0.5, 1., 0.5, 0.5, 1.5])
+    assert np.allclose(weights, expected)
+
+
+def test_validation_freq():
+    model = Sequential([Dense(1)])
+    model.compile('sgd', 'mse')
+
+    def _gen():
+        while True:
+            yield np.ones((2, 10)), np.ones((2, 1))
+
+    x, y = np.ones((10, 10)), np.ones((10, 1))
+
+    class ValCounter(Callback):
+
+        def __init__(self):
+            self.val_runs = 0
+
+        def on_test_begin(self, logs=None):
+            self.val_runs += 1
+
+    # Test in training_arrays.py
+    val_counter = ValCounter()
+    model.fit(
+        x,
+        y,
+        batch_size=2,
+        epochs=4,
+        validation_data=(x, y),
+        validation_freq=2,
+        callbacks=[val_counter])
+    assert val_counter.val_runs == 2
+
+    # Test in training_generator.py
+    val_counter = ValCounter()
+    model.fit_generator(
+        _gen(),
+        epochs=4,
+        steps_per_epoch=5,
+        validation_data=(x, y),
+        validation_freq=[4, 2, 2, 1],
+        callbacks=[val_counter])
+    assert val_counter.val_runs == 3
+
+
+def test_loss_correctness():
+    class Bias(Layer):
+
+        def build(self, input_shape):
+            self.bias = self.add_weight('bias', (1,), initializer='zeros')
+
+        def call(self, inputs):
+            return inputs + self.bias
+
+    inp = Input(shape=(1,))
+    out = Bias()(inp)
+    model = Model(inp, out)
+    model.compile(
+        keras.optimizers.SGD(lr=0.1),
+        loss=keras.losses.MeanAbsoluteError())
+
+    x = np.array([[0.], [1.], [2.]])
+    y = np.array([[0.5], [2.], [3.5]])
+    history = model.fit(x, y, batch_size=3, epochs=5)
+    np.allclose(history.history['loss'], [1., 0.9, 0.8, 0.7, 0.6])
+
+
+def test_model_metrics_list():
+
+    class LayerWithAddMetric(Layer):
+
+        def __init__(self):
+            super(LayerWithAddMetric, self).__init__()
+            self.dense = keras.layers.Dense(1, kernel_initializer='ones')
+
+        def __call__(self, inputs):
+            outputs = self.dense(inputs)
+            return outputs
+
+    class LayerWithNestedAddMetricLayer(Layer):
+
+        def __init__(self):
+            super(LayerWithNestedAddMetricLayer, self).__init__()
+            self.layer = LayerWithAddMetric()
+
+        def call(self, inputs):
+            outputs = self.layer(inputs)
+            self.add_metric(K.sum(outputs), name='metric_4')
+            return outputs
+
+    x = Input(shape=(1,))
+    y = LayerWithNestedAddMetricLayer()(x)
+
+    model = keras.models.Model(x, y)
+    model.add_metric(K.sum(y), name='metric_2')
+    model.add_metric(metrics.Mean(name='metric_3')(y))
+
+    model.compile(
+        'sgd',
+        loss='mse',
+        metrics=[metrics.MeanSquaredError('metric_1')])
+
+    # Verify that the metrics added using `compile` and `add_metric` API are
+    # included
+    for m1, m2 in zip([m.name for m in model._compile_metrics], ['metric_1']):
+        assert m1 == m2
+
+    for m1, m2 in zip(
+            [m.name for m in model.metrics],
+            ['metric_1', 'metric_2', 'metric_3', 'metric_4']):
+        assert m1 == m2
+
+
+def test_model_metrics_list_in_call():
+
+    class TestModel(Model):
+
+        def __init__(self):
+            super(TestModel, self).__init__(name='test_model')
+            self.dense1 = keras.layers.Dense(2)
+
+        def call(self, x):
+            self.add_metric(K.sum(x), name='metric_2')
+            return self.dense1(x)
+
+    model = TestModel()
+    model.compile(
+        loss='mse',
+        optimizer='adam',
+        metrics=[metrics.MeanSquaredError('metric_1')])
+    x = np.ones(shape=(10, 1))
+    y = np.ones(shape=(10, 2))
+    model.fit(x, y, epochs=2, batch_size=5, validation_data=(x, y))
+
+    # Verify that the metrics added using `compile` and `add_metric` API are
+    # included
+    for m1, m2 in zip([m.name for m in model._compile_metrics], ['metric_1']):
+        assert m1 == m2
+
+    for m1, m2 in zip(
+            [m.name for m in model.metrics],
+            ['metric_1', 'metric_2']):
+        assert m1 == m2
+
+
+def test_duplicate_metric_name_in_add_metric():
+
+    class TestModel(Model):
+
+        def __init__(self):
+            super(TestModel, self).__init__(name='test_model')
+            self.dense1 = keras.layers.Dense(2, kernel_initializer='ones')
+            self.mean = metrics.Mean(name='metric_1')
+            self.mean2 = metrics.Mean(name='metric_1')
+
+        def call(self, x):
+            self.add_metric(self.mean(x), name='metric_1')
+            return self.dense1(x)
+
+    model = TestModel()
+    model.compile(loss='mse', optimizer='adam')
+
+    x = np.ones(shape=(10, 1))
+    y = np.ones(shape=(10, 2))
+    with pytest.raises(ValueError):
+        model.fit(x, y, epochs=2, batch_size=5, validation_data=(x, y))
+
+
+def test_add_metric_on_model():
+    x = Input(shape=(1,))
+    y = Dense(1, kernel_initializer='ones', trainable=False)(x)
+    model = Model(x, y)
+    model.add_metric(K.sum(y), name='metric_1')
+    model.add_metric(metrics.Mean(name='metric_2')(y))
+    model.compile('sgd', loss='mse', metrics=['mse'])
+
+    inputs = np.ones(shape=(10, 1))
+    targets = np.zeros(shape=(10, 1))
+    history = model.fit(
+        inputs,
+        targets,
+        epochs=2,
+        batch_size=5,
+        validation_data=(inputs, targets))
+    assert history.history['metric_1'][-1] == 5
+    assert history.history['val_metric_1'][-1] == 5
+
+    assert history.history['metric_2'][-1] == 1
+    assert history.history['val_metric_2'][-1] == 1
+
+    eval_results = model.evaluate(inputs, targets, batch_size=5)
+    assert eval_results[-2] == 5
+    assert eval_results[-1] == 1
+
+    model.predict(inputs, batch_size=5)
+    model.train_on_batch(inputs, targets)
+    model.test_on_batch(inputs, targets)
+
+
+def test_add_metric_in_model_call():
+
+    class TestModel(Model):
+
+        def __init__(self):
+            super(TestModel, self).__init__(name='test_model')
+            self.dense1 = keras.layers.Dense(2, kernel_initializer='ones')
+            self.mean = metrics.Mean(name='metric_1')
+
+        def call(self, x):
+            self.add_metric(K.sum(x), name='metric_2')
+            # Provide same name as in the instance created in __init__
+            # for eager mode
+            self.add_metric(self.mean(x), name='metric_1')
+            return self.dense1(x)
+
+    model = TestModel()
+    model.compile(loss='mse', optimizer='sgd')
+
+    x = np.ones(shape=(10, 1))
+    y = np.ones(shape=(10, 2))
+    history = model.fit(x, y, epochs=2, batch_size=5, validation_data=(x, y))
+    assert np.isclose(history.history['metric_1'][-1], 1, 0)
+    assert np.isclose(history.history['val_metric_1'][-1], 1, 0)
+    assert np.isclose(history.history['metric_2'][-1], 5, 0)
+    assert np.isclose(history.history['val_metric_2'][-1], 5, 0)
+
+    eval_results = model.evaluate(x, y, batch_size=5)
+    assert np.isclose(eval_results[1], 1, 0)
+    assert np.isclose(eval_results[2], 5, 0)
+
+    model.predict(x, batch_size=5)
+    model.train_on_batch(x, y)
+    model.test_on_batch(x, y)
+
+
+def test_multiple_add_metric_calls():
+
+    class TestModel(Model):
+
+        def __init__(self):
+            super(TestModel, self).__init__(name='test_model')
+            self.dense1 = keras.layers.Dense(2, kernel_initializer='ones')
+            self.mean1 = metrics.Mean(name='metric_1')
+            self.mean2 = metrics.Mean(name='metric_2')
+
+        def call(self, x):
+            self.add_metric(self.mean2(x), name='metric_2')
+            self.add_metric(self.mean1(x), name='metric_1')
+            self.add_metric(K.sum(x), name='metric_3')
+            return self.dense1(x)
+
+    model = TestModel()
+    model.compile(loss='mse', optimizer='sgd')
+
+    x = np.ones(shape=(10, 1))
+    y = np.ones(shape=(10, 2))
+    history = model.fit(x, y, epochs=2, batch_size=5, validation_data=(x, y))
+    assert np.isclose(history.history['metric_1'][-1], 1, 0)
+    assert np.isclose(history.history['metric_2'][-1], 1, 0)
+    assert np.isclose(history.history['metric_3'][-1], 5, 0)
+
+    eval_results = model.evaluate(x, y, batch_size=5)
+    assert np.allclose(eval_results[1:4], [1, 1, 5], 0.1)
+
+    model.predict(x, batch_size=5)
+    model.train_on_batch(x, y)
+    model.test_on_batch(x, y)
+
+
+def test_add_metric_in_layer_call():
+
+    class TestLayer(Layer):
+
+        def build(self, input_shape):
+            self.a = self.add_weight(
+                'a', (1, 1), initializer='ones', trainable=False)
+            self.built = True
+
+        def call(self, inputs):
+            self.add_metric(K.sum(inputs), name='metric_1')
+            return inputs + 1
+
+    inp = Input(shape=(1,))
+    x = TestLayer(input_shape=(1,))(inp)
+    x = keras.layers.Dense(2, kernel_initializer='ones')(x)
+
+    model = Model(inp, x)
+    model.compile('adam', loss='mse')
+
+    x = np.ones(shape=(10, 1))
+    y = np.ones(shape=(10, 2))
+    history = model.fit(x, y, epochs=2, batch_size=5, validation_data=(x, y))
+    assert np.isclose(history.history['metric_1'][-1], 5, 0)
+    assert np.isclose(history.history['val_metric_1'][-1], 5, 0)
 
 
 if __name__ == '__main__':

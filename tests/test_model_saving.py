@@ -1,7 +1,10 @@
+import io
 import pytest
 import os
 import h5py
 import tempfile
+import warnings
+from contextlib import contextmanager
 import numpy as np
 from numpy.testing import assert_allclose
 from numpy.testing import assert_raises
@@ -11,13 +14,18 @@ from keras.engine.saving import preprocess_weights_for_loading
 from keras.models import Model, Sequential
 from keras.layers import Dense, Lambda, RepeatVector, TimeDistributed
 from keras.layers import Bidirectional, GRU, LSTM, CuDNNGRU, CuDNNLSTM
-from keras.layers import Conv2D, Flatten
+from keras.layers import Conv2D, Flatten, Activation
 from keras.layers import Input, InputLayer
 from keras.initializers import Constant
 from keras import optimizers
 from keras import losses
 from keras import metrics
 from keras.models import save_model, load_model
+from keras.utils.test_utils import tf_file_io_proxy
+try:
+    from unittest.mock import patch
+except:
+    from mock import patch
 
 
 skipif_no_tf_gpu = pytest.mark.skipif(
@@ -31,7 +39,7 @@ def test_sequential_model_saving():
     model.add(Dense(2, input_shape=(3,)))
     model.add(RepeatVector(3))
     model.add(TimeDistributed(Dense(3)))
-    model.compile(loss=losses.MSE,
+    model.compile(loss=losses.MeanSquaredError(),
                   optimizer=optimizers.RMSprop(lr=0.0001),
                   metrics=[metrics.categorical_accuracy],
                   sample_weight_mode='temporal')
@@ -40,23 +48,31 @@ def test_sequential_model_saving():
     model.train_on_batch(x, y)
 
     out = model.predict(x)
+
     _, fname = tempfile.mkstemp('.h5')
     save_model(model, fname)
-
-    new_model = load_model(fname)
+    new_model_disk = load_model(fname)
     os.remove(fname)
 
-    out2 = new_model.predict(x)
-    assert_allclose(out, out2, atol=1e-05)
+    with tf_file_io_proxy('keras.engine.saving.tf_file_io') as file_io_proxy:
+        gcs_filepath = file_io_proxy.get_filepath(filename=fname)
+        save_model(model, gcs_filepath)
+        file_io_proxy.assert_exists(gcs_filepath)
+        new_model_gcs = load_model(gcs_filepath)
+        file_io_proxy.delete_file(gcs_filepath)  # cleanup
 
-    # test that new updates are the same with both models
-    x = np.random.random((1, 3))
-    y = np.random.random((1, 3, 3))
-    model.train_on_batch(x, y)
-    new_model.train_on_batch(x, y)
-    out = model.predict(x)
-    out2 = new_model.predict(x)
-    assert_allclose(out, out2, atol=1e-05)
+    x2 = np.random.random((1, 3))
+    y2 = np.random.random((1, 3, 3))
+    model.train_on_batch(x2, y2)
+    out_2 = model.predict(x2)
+
+    for new_model in [new_model_disk, new_model_gcs]:
+        new_out = new_model.predict(x)
+        assert_allclose(out, new_out, atol=1e-05)
+        # test that new updates are the same with both models
+        new_model.train_on_batch(x2, y2)
+        new_out_2 = new_model.predict(x2)
+        assert_allclose(out_2, new_out_2, atol=1e-05)
 
 
 def test_sequential_model_saving_2():
@@ -71,56 +87,65 @@ def test_sequential_model_saving_2():
     x = np.random.random((1, 3))
     y = np.random.random((1, 3))
     model.train_on_batch(x, y)
-
     out = model.predict(x)
+
+    load_kwargs = {'custom_objects': {'custom_opt': custom_opt,
+                                      'custom_loss': custom_loss}}
     _, fname = tempfile.mkstemp('.h5')
     save_model(model, fname)
-
-    model = load_model(fname,
-                       custom_objects={'custom_opt': custom_opt,
-                                       'custom_loss': custom_loss})
+    new_model_disk = load_model(fname, **load_kwargs)
     os.remove(fname)
 
-    out2 = model.predict(x)
-    assert_allclose(out, out2, atol=1e-05)
+    with tf_file_io_proxy('keras.engine.saving.tf_file_io') as file_io_proxy:
+        gcs_filepath = file_io_proxy.get_filepath(filename=fname)
+        save_model(model, gcs_filepath)
+        file_io_proxy.assert_exists(gcs_filepath)
+        new_model_gcs = load_model(gcs_filepath, **load_kwargs)
+        file_io_proxy.delete_file(gcs_filepath)  # cleanup
+
+    for new_model in [new_model_disk, new_model_gcs]:
+        new_out = new_model.predict(x)
+        assert_allclose(out, new_out, atol=1e-05)
+
+
+def _get_sample_model_and_input():
+    inputs = Input(shape=(3,))
+    x = Dense(2)(inputs)
+    outputs = Dense(3)(x)
+
+    model = Model(inputs, outputs)
+    model.compile(loss=losses.MSE,
+                  optimizer=optimizers.Adam(),
+                  metrics=[metrics.categorical_accuracy])
+    x = np.random.random((1, 3))
+    y = np.random.random((1, 3))
+    model.train_on_batch(x, y)
+
+    return model, x
 
 
 def test_functional_model_saving():
-    inputs = Input(shape=(3,))
-    x = Dense(2)(inputs)
-    outputs = Dense(3)(x)
-
-    model = Model(inputs, outputs)
-    model.compile(loss=losses.MSE,
-                  optimizer=optimizers.Adam(),
-                  metrics=[metrics.categorical_accuracy])
-    x = np.random.random((1, 3))
-    y = np.random.random((1, 3))
-    model.train_on_batch(x, y)
-
+    model, x = _get_sample_model_and_input()
     out = model.predict(x)
     _, fname = tempfile.mkstemp('.h5')
     save_model(model, fname)
-
-    model = load_model(fname)
+    new_model_disk = load_model(fname)
     os.remove(fname)
 
-    out2 = model.predict(x)
-    assert_allclose(out, out2, atol=1e-05)
+    with tf_file_io_proxy('keras.engine.saving.tf_file_io') as file_io_proxy:
+        gcs_filepath = file_io_proxy.get_filepath(filename=fname)
+        save_model(model, gcs_filepath)
+        file_io_proxy.assert_exists(gcs_filepath)
+        new_model_gcs = load_model(gcs_filepath)
+        file_io_proxy.delete_file(gcs_filepath)  # cleanup
+
+    for new_model in [new_model_disk, new_model_gcs]:
+        new_out = new_model.predict(x)
+        assert_allclose(out, new_out, atol=1e-05)
 
 
 def test_model_saving_to_pre_created_h5py_file():
-    inputs = Input(shape=(3,))
-    x = Dense(2)(inputs)
-    outputs = Dense(3)(x)
-
-    model = Model(inputs, outputs)
-    model.compile(loss=losses.MSE,
-                  optimizer=optimizers.Adam(),
-                  metrics=[metrics.categorical_accuracy])
-    x = np.random.random((1, 3))
-    y = np.random.random((1, 3))
-    model.train_on_batch(x, y)
+    model, x = _get_sample_model_and_input()
 
     out = model.predict(x)
     _, fname = tempfile.mkstemp('.h5')
@@ -146,44 +171,56 @@ def test_model_saving_to_pre_created_h5py_file():
     assert_allclose(out, out2, atol=1e-05)
 
 
+@contextmanager
+def temp_filename(filename):
+    """Context that returns a temporary filename and deletes the file on exit if
+    it still exists (so that this is not forgotten).
+    """
+    _, temp_fname = tempfile.mkstemp(filename)
+    yield temp_fname
+    if os.path.exists(temp_fname):
+        os.remove(temp_fname)
+
+
 def test_model_saving_to_binary_stream():
-    inputs = Input(shape=(3,))
-    x = Dense(2)(inputs)
-    outputs = Dense(3)(x)
-
-    model = Model(inputs, outputs)
-    model.compile(loss=losses.MSE,
-                  optimizer=optimizers.Adam(),
-                  metrics=[metrics.categorical_accuracy])
-    x = np.random.random((1, 3))
-    y = np.random.random((1, 3))
-    model.train_on_batch(x, y)
-
+    model, x = _get_sample_model_and_input()
     out = model.predict(x)
-    _, fname = tempfile.mkstemp('.h5')
-    with h5py.File(fname, mode='r+') as h5file:
-        save_model(model, h5file)
-        loaded_model = load_model(h5file)
-        out2 = loaded_model.predict(x)
+
+    with temp_filename('h5') as fname:
+        # save directly to binary file
+        with open(fname, 'wb') as raw_file:
+            save_model(model, raw_file)
+        # Load the data the usual way, and make sure the model is intact.
+        with h5py.File(fname, mode='r') as h5file:
+            loaded_model = load_model(h5file)
+    out2 = loaded_model.predict(x)
     assert_allclose(out, out2, atol=1e-05)
 
-    # Save the model to an in-memory-only h5 file.
-    with h5py.File('does not matter', driver='core',
-                   backing_store=False) as h5file:
-        save_model(model, h5file)
-        h5file.flush()  # Very important! Otherwise you get all zeroes below.
-        binary_data = h5file.fid.get_file_image()
 
-        # Make sure the binary data is correct by saving it to a file manually
-        # and then loading it the usual way.
-        with open(fname, 'wb') as raw_file:
-            raw_file.write(binary_data)
+def test_model_loading_from_binary_stream():
+    model, x = _get_sample_model_and_input()
+    out = model.predict(x)
 
-    # Load the manually-saved binary data, and make sure the model is intact.
-    with h5py.File(fname, mode='r') as h5file:
-        loaded_model = load_model(h5file)
-        out2 = loaded_model.predict(x)
+    with temp_filename('h5') as fname:
+        # save the model the usual way
+        with h5py.File(fname, mode='w') as h5file:
+            save_model(model, h5file)
+        # Load the data binary, and make sure the model is intact.
+        with open(fname, 'rb') as raw_file:
+            loaded_model = load_model(raw_file)
+    out2 = loaded_model.predict(x)
+    assert_allclose(out, out2, atol=1e-05)
 
+
+def test_model_save_load_binary_in_memory():
+    model, x = _get_sample_model_and_input()
+    out = model.predict(x)
+
+    stream = io.BytesIO()
+    save_model(model, stream)
+    stream.seek(0)
+    loaded_model = load_model(stream)
+    out2 = loaded_model.predict(x)
     assert_allclose(out, out2, atol=1e-05)
 
 
@@ -558,6 +595,7 @@ def test_saving_model_with_long_weights_names():
     f = x
     for i in range(4):
         f = Dense(2, name='nested_model_dense_%d' % (i,))(f)
+    f = Dense(2, name='nested_model_dense_4', trainable=False)(f)
     # This layer name will make the `weights_name`
     # HDF5 attribute blow out of proportion.
     f = Dense(2, name='nested_model_output' + ('x' * (2**15)))(f)
@@ -632,6 +670,29 @@ def test_saving_recurrent_layer_without_bias():
     os.remove(fname)
 
 
+def test_loop_model_saving():
+    model = Sequential()
+    model.add(Dense(2, input_shape=(3,)))
+    model.compile(loss=losses.MSE,
+                  optimizer=optimizers.RMSprop(lr=0.0001),
+                  metrics=[metrics.categorical_accuracy])
+
+    x = np.random.random((1, 3))
+    y = np.random.random((1, 2))
+    _, fname = tempfile.mkstemp('.h5')
+
+    for _ in range(3):
+        model.train_on_batch(x, y)
+        save_model(model, fname, overwrite=True)
+        out = model.predict(x)
+
+    new_model = load_model(fname)
+    os.remove(fname)
+
+    out2 = new_model.predict(x)
+    assert_allclose(out, out2, atol=1e-05)
+
+
 def test_saving_constant_initializer_with_numpy():
     """Test saving and loading model of constant initializer with numpy inputs.
     """
@@ -645,6 +706,102 @@ def test_saving_constant_initializer_with_numpy():
     save_model(model, fname)
     model = load_model(fname)
     os.remove(fname)
+
+
+def test_saving_group_naming_h5py(tmpdir):
+    """Test saving model with layer which name is prefix to a previous layer
+    name
+    """
+
+    input_layer = Input((None, None, 3), name='test_input')
+    x = Conv2D(1, 1, name='conv1/conv')(input_layer)
+    x = Activation('relu', name='conv1')(x)
+
+    model = Model(inputs=input_layer, outputs=x)
+    p = tmpdir.mkdir("test").join("test.h5")
+    model.save_weights(p)
+    model.load_weights(p)
+
+
+def test_save_load_weights_gcs():
+    model = Sequential()
+    model.add(Dense(2, input_shape=(3,)))
+    org_weights = model.get_weights()
+
+    with tf_file_io_proxy('keras.engine.saving.tf_file_io') as file_io_proxy:
+        gcs_filepath = file_io_proxy.get_filepath(
+            filename='test_save_load_weights_gcs.h5')
+        # we should not use same filename in several tests to allow for parallel
+        # execution
+        model.save_weights(gcs_filepath)
+        model.set_weights([np.random.random(w.shape) for w in org_weights])
+        for w, org_w in zip(model.get_weights(), org_weights):
+            assert not (w == org_w).all()
+        model.load_weights(gcs_filepath)
+        for w, org_w in zip(model.get_weights(), org_weights):
+            assert_allclose(w, org_w)
+
+        file_io_proxy.delete_file(gcs_filepath)  # cleanup
+
+
+def test_saving_overwrite_option():
+    model = Sequential()
+    model.add(Dense(2, input_shape=(3,)))
+    org_weights = model.get_weights()
+    new_weights = [np.random.random(w.shape) for w in org_weights]
+
+    _, fname = tempfile.mkstemp('.h5')
+    save_model(model, fname)
+    model.set_weights(new_weights)
+
+    with patch('keras.engine.saving.ask_to_proceed_with_overwrite') as ask:
+        ask.return_value = False
+        save_model(model, fname, overwrite=False)
+        ask.assert_called_once()
+        new_model = load_model(fname)
+        for w, org_w in zip(new_model.get_weights(), org_weights):
+            assert_allclose(w, org_w)
+
+        ask.return_value = True
+        save_model(model, fname, overwrite=False)
+        assert ask.call_count == 2
+        new_model = load_model(fname)
+        for w, new_w in zip(new_model.get_weights(), new_weights):
+            assert_allclose(w, new_w)
+
+    os.remove(fname)
+
+
+def test_saving_overwrite_option_gcs():
+    model = Sequential()
+    model.add(Dense(2, input_shape=(3,)))
+    org_weights = model.get_weights()
+    new_weights = [np.random.random(w.shape) for w in org_weights]
+
+    with tf_file_io_proxy('keras.engine.saving.tf_file_io') as file_io_proxy:
+        gcs_filepath = file_io_proxy.get_filepath(
+            filename='test_saving_overwrite_option_gcs.h5')
+        # we should not use same filename in several tests to allow for parallel
+        # execution
+        save_model(model, gcs_filepath)
+        model.set_weights(new_weights)
+
+        with patch('keras.engine.saving.ask_to_proceed_with_overwrite') as ask:
+            ask.return_value = False
+            save_model(model, gcs_filepath, overwrite=False)
+            ask.assert_called_once()
+            new_model = load_model(gcs_filepath)
+            for w, org_w in zip(new_model.get_weights(), org_weights):
+                assert_allclose(w, org_w)
+
+            ask.return_value = True
+            save_model(model, gcs_filepath, overwrite=False)
+            assert ask.call_count == 2
+            new_model = load_model(gcs_filepath)
+            for w, new_w in zip(new_model.get_weights(), new_weights):
+                assert_allclose(w, new_w)
+
+        file_io_proxy.delete_file(gcs_filepath)  # cleanup
 
 
 @pytest.mark.parametrize('implementation', [1, 2], ids=['impl1', 'impl2'])
@@ -810,6 +967,40 @@ def test_preprocess_weights_for_loading_gru_incompatible():
     assert_not_compatible(gru(reset_after=True), gru(),
                           'GRU(reset_after=True) is not compatible with '
                           'GRU(reset_after=False)')
+
+
+def test_model_saving_with_rnn_initial_state_and_args():
+    class CustomRNN(LSTM):
+        def call(self, inputs, arg=1, mask=None, training=None, initial_state=None):
+            if isinstance(inputs, list):
+                inputs = inputs[:]
+                shape = K.int_shape(inputs[0])
+                inputs[0] *= arg
+                inputs[0]._keras_shape = shape  # for theano backend
+            else:
+                shape = K.int_shape(inputs)
+                inputs *= arg
+                inputs._keras_shape = shape  # for theano backend
+            return super(CustomRNN, self).call(inputs, mask, training, initial_state)
+
+    inp = Input((3, 2))
+    rnn_out, h, c = CustomRNN(2, return_state=True, return_sequences=True)(inp)
+    assert hasattr(rnn_out, '_keras_history')
+    assert hasattr(h, '_keras_history')
+    assert hasattr(c, '_keras_history')
+    rnn2_out = CustomRNN(2)(rnn_out, arg=2, initial_state=[h, c])
+    assert hasattr(rnn2_out, '_keras_history')
+    model = Model(inputs=inp, outputs=rnn2_out)
+    x = np.random.random((2, 3, 2))
+    y1 = model.predict(x)
+    _, fname = tempfile.mkstemp('.h5')
+    with warnings.catch_warnings():
+        warnings.filterwarnings('error')
+        model.save(fname)
+    model2 = load_model(fname, custom_objects={'CustomRNN': CustomRNN})
+    y2 = model2.predict(x)
+    assert_allclose(y1, y2, atol=1e-5)
+    os.remove(fname)
 
 
 if __name__ == '__main__':

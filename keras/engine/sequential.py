@@ -26,6 +26,7 @@ class Sequential(Model):
 
     # Arguments
         layers: list of layers to add to the model.
+        name: Name given to the model
 
     # Example
 
@@ -261,7 +262,7 @@ class Sequential(Model):
             batch_size: integer.
             verbose: verbosity mode, 0 or 1.
 
-        # Returns:
+        # Returns
             A numpy array of class predictions.
         """
         proba = self.predict(x, batch_size=batch_size, verbose=verbose)
@@ -291,6 +292,9 @@ class Sequential(Model):
             name = config['name']
             build_input_shape = config.get('build_input_shape')
             layer_configs = config['layers']
+        else:  # legacy config file
+            name = build_input_shape = None
+            layer_configs = config
         model = cls(name=name)
         for conf in layer_configs:
             layer = layer_module.deserialize(conf,

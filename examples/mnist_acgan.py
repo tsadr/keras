@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Train an Auxiliary Classifier Generative Adversarial Network (ACGAN) on the
-MNIST dataset. See https://arxiv.org/abs/1610.09585 for more details.
+#Train an Auxiliary Classifier GAN (ACGAN) on the MNIST dataset.
+
+[More details on Auxiliary Classifier GANs.](https://arxiv.org/abs/1610.09585)
 
 You should start to see reasonable images after ~5 epochs, and good images
 by ~15 epochs. You should use a GPU, as the convolution-heavy operations are
@@ -11,13 +12,13 @@ as the compilation time can be a blocker using Theano.
 Timings:
 
 Hardware           | Backend | Time / Epoch
--------------------------------------------
+:------------------|:--------|------------:
  CPU               | TF      | 3 hrs
  Titan X (maxwell) | TF      | 4 min
  Titan X (maxwell) | TH      | 7 min
 
-Consult https://github.com/lukedeo/keras-acgan for more information and
-example output
+Consult [Auxiliary Classifier Generative Adversarial Networks in Keras
+](https://github.com/lukedeo/keras-acgan) for more information and example output.
 """
 from __future__ import print_function
 
@@ -76,8 +77,8 @@ def build_generator(latent_size):
     # this will be our label
     image_class = Input(shape=(1,), dtype='int32')
 
-    cls = Flatten()(Embedding(num_classes, latent_size,
-                              embeddings_initializer='glorot_normal')(image_class))
+    cls = Embedding(num_classes, latent_size,
+                    embeddings_initializer='glorot_normal')(image_class)
 
     # hadamard product between z-space and a class conditional embedding
     h = layers.multiply([latent, cls])
@@ -124,8 +125,8 @@ def build_discriminator():
 
     return Model(image, [fake, aux])
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
     # batch and latent size taken from the paper
     epochs = 100
     batch_size = 100
@@ -139,7 +140,7 @@ if __name__ == '__main__':
     print('Discriminator model:')
     discriminator = build_discriminator()
     discriminator.compile(
-        optimizer=Adam(lr=adam_lr, beta_1=adam_beta_1),
+        optimizer=Adam(learning_rate=adam_lr, beta_1=adam_beta_1),
         loss=['binary_crossentropy', 'sparse_categorical_crossentropy']
     )
     discriminator.summary()
@@ -160,7 +161,7 @@ if __name__ == '__main__':
 
     print('Combined model:')
     combined.compile(
-        optimizer=Adam(lr=adam_lr, beta_1=adam_beta_1),
+        optimizer=Adam(learning_rate=adam_lr, beta_1=adam_beta_1),
         loss=['binary_crossentropy', 'sparse_categorical_crossentropy']
     )
     combined.summary()
@@ -217,10 +218,10 @@ if __name__ == '__main__':
             aux_y = np.concatenate((label_batch, sampled_labels), axis=0)
 
             # we don't want the discriminator to also maximize the classification
-            # accuracy of the auxilary classifier on generated images, so we
+            # accuracy of the auxiliary classifier on generated images, so we
             # don't train discriminator to produce class labels for generated
             # images (see https://openreview.net/forum?id=rJXTf9Bxg).
-            # To preserve sum of sample weights for the auxilary classifier,
+            # To preserve sum of sample weights for the auxiliary classifier,
             # we assign sample weight of 2 to the real images.
             disc_sample_weight = [np.ones(2 * len(image_batch)),
                                   np.concatenate((np.ones(len(image_batch)) * 2,

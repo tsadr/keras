@@ -33,7 +33,7 @@ from ..utils.generic_utils import Progbar
 
 if sys.version_info[0] == 2:
     def urlretrieve(url, filename, reporthook=None, data=None):
-        """Replacement for `urlretrive` for Python 2.
+        """Replacement for `urlretrieve` for Python 2.
 
         Under Python 2, `urlretrieve` relies on `FancyURLopener` from legacy
         `urllib` module, known to have issues with proxy management.
@@ -67,8 +67,8 @@ if sys.version_info[0] == 2:
                     break
 
         with closing(urlopen(url, data)) as response, open(filename, 'wb') as fd:
-                for chunk in chunk_read(response, reporthook=reporthook):
-                    fd.write(chunk)
+            for chunk in chunk_read(response, reporthook=reporthook):
+                fd.write(chunk)
 else:
     from six.moves.urllib.request import urlretrieve
 
@@ -91,16 +91,16 @@ def _extract_archive(file_path, path='.', archive_format='auto'):
     """
     if archive_format is None:
         return False
-    if archive_format is 'auto':
+    if archive_format == 'auto':
         archive_format = ['tar', 'zip']
     if isinstance(archive_format, six.string_types):
         archive_format = [archive_format]
 
     for archive_type in archive_format:
-        if archive_type is 'tar':
+        if archive_type == 'tar':
             open_fn = tarfile.open
             is_match_fn = tarfile.is_tarfile
-        if archive_type is 'zip':
+        if archive_type == 'zip':
             open_fn = zipfile.ZipFile
             is_match_fn = zipfile.is_zipfile
 
@@ -170,7 +170,10 @@ def get_file(fname,
         Path to the downloaded file
     """  # noqa
     if cache_dir is None:
-        cache_dir = os.path.join(os.path.expanduser('~'), '.keras')
+        if 'KERAS_HOME' in os.environ:
+            cache_dir = os.environ.get('KERAS_HOME')
+        else:
+            cache_dir = os.path.join(os.path.expanduser('~'), '.keras')
     if md5_hash is not None and file_hash is None:
         file_hash = md5_hash
         hash_algorithm = 'md5'
@@ -192,10 +195,10 @@ def get_file(fname,
         # File found; verify integrity if a hash was provided.
         if file_hash is not None:
             if not validate_file(fpath, file_hash, algorithm=hash_algorithm):
-                print('A local file was found, but it seems to be '
-                      'incomplete or outdated because the ' + hash_algorithm +
-                      ' file hash does not match the original value of ' +
-                      file_hash + ' so we will re-download the data.')
+                print('A local file was found, but it seems to be incomplete'
+                      ' or outdated because the {} file hash does not match '
+                      'the original value of {} so we will re-download the '
+                      'data.'.format(hash_algorithm, file_hash))
                 download = True
     else:
         download = True
@@ -210,13 +213,13 @@ def get_file(fname,
 
         def dl_progress(count, block_size, total_size):
             if ProgressTracker.progbar is None:
-                if total_size is -1:
+                if total_size == -1:
                     total_size = None
                 ProgressTracker.progbar = Progbar(total_size)
             else:
                 ProgressTracker.progbar.update(count * block_size)
 
-        error_msg = 'URL fetch failure on {}: {} -- {}'
+        error_msg = 'URL fetch failure on {} : {} -- {}'
         try:
             try:
                 urlretrieve(origin, fpath, dl_progress)
@@ -247,7 +250,7 @@ def _hash_file(fpath, algorithm='sha256', chunk_size=65535):
     # Example
 
     ```python
-        >>> from keras.data_utils import _hash_file
+        >>> from keras.utils.data_utils import _hash_file
         >>> _hash_file('/path/to/file.zip')
         'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
     ```
@@ -261,7 +264,7 @@ def _hash_file(fpath, algorithm='sha256', chunk_size=65535):
     # Returns
         The file hash
     """
-    if (algorithm is 'sha256') or (algorithm is 'auto' and len(hash) is 64):
+    if (algorithm == 'sha256') or (algorithm == 'auto' and len(hash) == 64):
         hasher = hashlib.sha256()
     else:
         hasher = hashlib.md5()
@@ -287,8 +290,8 @@ def validate_file(fpath, file_hash, algorithm='auto', chunk_size=65535):
     # Returns
         Whether the file is valid
     """
-    if ((algorithm is 'sha256') or
-            (algorithm is 'auto' and len(file_hash) is 64)):
+    if ((algorithm == 'sha256') or
+            (algorithm == 'auto' and len(file_hash) == 64)):
         hasher = 'sha256'
     else:
         hasher = 'md5'
@@ -340,6 +343,8 @@ class Sequence(object):
                        for file_name in batch_x]), np.array(batch_y)
     ```
     """
+
+    use_sequence_api = True
 
     @abstractmethod
     def __getitem__(self, index):
@@ -536,6 +541,7 @@ class OrderedEnqueuer(SequenceEnqueuer):
     def __init__(self, sequence, use_multiprocessing=False, shuffle=False):
         super(OrderedEnqueuer, self).__init__(sequence, use_multiprocessing)
         self.shuffle = shuffle
+        self.end_of_epoch_signal = threading.Event()
 
     def _get_executor_init(self, workers):
         """Get the Pool initializer for multiprocessing.
@@ -556,9 +562,10 @@ class OrderedEnqueuer(SequenceEnqueuer):
 
     def _run(self):
         """Submits request to the executor and queue the `Future` objects."""
-        sequence = list(range(len(self.sequence)))
-        self._send_sequence()  # Share the initial sequence
         while True:
+            sequence = list(range(len(self.sequence)))
+            self._send_sequence()  # Share the initial sequence
+
             if self.shuffle:
                 random.shuffle(sequence)
 
@@ -566,8 +573,9 @@ class OrderedEnqueuer(SequenceEnqueuer):
                 for i in sequence:
                     if self.stop_signal.is_set():
                         return
-                    self.queue.put(
-                        executor.apply_async(get_index, (self.uid, i)), block=True)
+                    future = executor.apply_async(get_index, (self.uid, i))
+                    future.idx = i
+                    self.queue.put(future, block=True)
 
                 # Done with the current epoch, waiting for the final batches
                 self._wait_queue()
@@ -578,7 +586,12 @@ class OrderedEnqueuer(SequenceEnqueuer):
 
             # Call the internal on epoch end.
             self.sequence.on_epoch_end()
-            self._send_sequence()  # Update the pool
+            # communicate on_epoch_end to the main thread
+            self.end_of_epoch_signal.set()
+
+    def join_end_of_epoch(self):
+        self.end_of_epoch_signal.wait(timeout=30)
+        self.end_of_epoch_signal.clear()
 
     def get(self):
         """Creates a generator to extract data from the queue.
@@ -592,11 +605,22 @@ class OrderedEnqueuer(SequenceEnqueuer):
         """
         try:
             while self.is_running():
-                inputs = self.queue.get(block=True).get()
-                self.queue.task_done()
+                try:
+                    future = self.queue.get(block=True)
+                    inputs = future.get(timeout=30)
+                except mp.TimeoutError:
+                    idx = future.idx
+                    warnings.warn(
+                        'The input {} could not be retrieved.'
+                        ' It could be because a worker has died.'.format(idx),
+                        UserWarning)
+                    inputs = self.sequence[idx]
+                finally:
+                    self.queue.task_done()
+
                 if inputs is not None:
                     yield inputs
-        except Exception as e:
+        except Exception:
             self.stop()
             six.reraise(*sys.exc_info())
 
@@ -635,7 +659,7 @@ class GeneratorEnqueuer(SequenceEnqueuer):
     Used in `fit_generator`, `evaluate_generator`, `predict_generator`.
 
     # Arguments
-        generator: a generator function which yields data
+        sequence: a sequence function which yields data
         use_multiprocessing: use multiprocessing if True, otherwise threading
         wait_time: time to sleep in-between calls to `put()`
         random_seed: Initial seed for workers,
@@ -682,8 +706,17 @@ class GeneratorEnqueuer(SequenceEnqueuer):
         """
         try:
             while self.is_running():
-                inputs = self.queue.get(block=True).get()
-                self.queue.task_done()
+                try:
+                    future = self.queue.get(block=True)
+                    inputs = future.get(timeout=30)
+                    self.queue.task_done()
+                except mp.TimeoutError:
+                    warnings.warn(
+                        'An input could not be retrieved.'
+                        ' It could be because a worker has died.'
+                        'We do not have any information on the lost sample.',
+                        UserWarning)
+                    continue
                 if inputs is not None:
                     yield inputs
         except StopIteration:
@@ -692,9 +725,9 @@ class GeneratorEnqueuer(SequenceEnqueuer):
             while self.queue.qsize() > 0:
                 last_ones.append(self.queue.get(block=True))
             # Wait for them to complete
-            list(map(lambda f: f.wait(), last_ones))
+            [f.wait() for f in last_ones]
             # Keep the good ones
-            last_ones = [future.get() for future in last_ones if future.successful()]
+            last_ones = (future.get() for future in last_ones if future.successful())
             for inputs in last_ones:
                 if inputs is not None:
                     yield inputs

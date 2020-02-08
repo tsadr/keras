@@ -49,7 +49,7 @@ def elu(x, alpha=1.0):
 
     # References
         - [Fast and Accurate Deep Network Learning by Exponential
-        Linear Units (ELUs)](https://arxiv.org/abs/1511.07289)
+           Linear Units (ELUs)](https://arxiv.org/abs/1511.07289)
     """
     return K.elu(x, alpha)
 
@@ -58,7 +58,7 @@ def selu(x):
     """Scaled Exponential Linear Unit (SELU).
 
     SELU is equal to: `scale * elu(x, alpha)`, where alpha and scale
-    are pre-defined constants. The values of `alpha` and `scale` are
+    are predefined constants. The values of `alpha` and `scale` are
     chosen so that the mean and variance of the inputs are preserved
     between two consecutive layers as long as the weights are initialized
     correctly (see `lecun_normal` initialization) and the number of inputs
@@ -101,35 +101,55 @@ def softsign(x):
         x: Input tensor.
 
     # Returns
-        The softplus activation: `x / (abs(x) + 1)`.
+        The softsign activation: `x / (abs(x) + 1)`.
     """
     return K.softsign(x)
 
 
-def relu(x, alpha=0., max_value=None):
+def relu(x, alpha=0., max_value=None, threshold=0.):
     """Rectified Linear Unit.
+
+    With default values, it returns element-wise `max(x, 0)`.
+
+    Otherwise, it follows:
+    `f(x) = max_value` for `x >= max_value`,
+    `f(x) = x` for `threshold <= x < max_value`,
+    `f(x) = alpha * (x - threshold)` otherwise.
 
     # Arguments
         x: Input tensor.
-        alpha: Slope of the negative part. Defaults to zero.
-        max_value: Maximum value for the output.
+        alpha: float. Slope of the negative part. Defaults to zero.
+        max_value: float. Saturation threshold.
+        threshold: float. Threshold value for thresholded activation.
 
     # Returns
-        The (leaky) rectified linear unit activation: `x` if `x > 0`,
-        `alpha * x` if `x < 0`. If `max_value` is defined, the result
-        is truncated to this value.
+        A tensor.
     """
-    return K.relu(x, alpha=alpha, max_value=max_value)
+    return K.relu(x, alpha=alpha, max_value=max_value, threshold=threshold)
 
 
 def tanh(x):
     """Hyperbolic tangent activation function.
+
+    # Arguments
+        x: Input tensor.
+
+    # Returns
+        The hyperbolic activation:
+        `tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))`
+
     """
     return K.tanh(x)
 
 
 def sigmoid(x):
     """Sigmoid activation function.
+
+    # Arguments
+        x: Input tensor.
+
+    # Returns
+        The sigmoid activation: `1 / (1 + exp(-x))`.
     """
     return K.sigmoid(x)
 
@@ -154,12 +174,24 @@ def hard_sigmoid(x):
 
 def exponential(x):
     """Exponential (base e) activation function.
+
+    # Arguments
+        x: Input tensor.
+
+    # Returns
+        Exponential activation: `exp(x)`.
     """
     return K.exp(x)
 
 
 def linear(x):
     """Linear (i.e. identity) activation function.
+
+    # Arguments
+        x: Input tensor.
+
+    # Returns
+        Input tensor, unchanged.
     """
     return x
 

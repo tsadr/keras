@@ -1,5 +1,13 @@
+import os
+from markdown import markdown
 from docs import autogen
 import pytest
+from keras import backend as K
+
+
+if K.backend() != 'tensorflow':
+    pytestmark = pytest.mark.skip
+
 
 test_doc1 = {
     'doc': """Base class for recurrent layers.
@@ -325,9 +333,89 @@ y = layer(x)
 '''}
 
 
-def test_doc_lists():
-    docstring = autogen.process_docstring(test_doc1['doc'])
-    assert docstring == test_doc1['result']
+test_doc_with_arguments_as_last_block = {
+    'doc': """Base class for recurrent layers.
+
+    # Arguments
+        return_sequences: Boolean. Whether to return the last output
+            in the output sequence, or the full sequence.
+        return_state: Boolean. Whether to return the last state
+            in addition to the output.
+    """,
+    'result': '''Base class for recurrent layers.
+
+__Arguments__
+
+- __return_sequences__: Boolean. Whether to return the last output
+    in the output sequence, or the full sequence.
+- __return_state__: Boolean. Whether to return the last state
+    in addition to the output.
+'''}
+
+
+@pytest.mark.parametrize('docs_descriptor', [
+    test_doc1,
+    test_doc_with_arguments_as_last_block,
+])
+def test_doc_lists(docs_descriptor):
+    docstring = autogen.process_docstring(docs_descriptor['doc'])
+    assert markdown(docstring) == markdown(docs_descriptor['result'])
+
+
+dummy_docstring = """Multiplies 2 tensors (and/or variables) and returns a *tensor*.
+
+    When attempting to multiply a nD tensor
+    with a nD tensor, it reproduces the Theano behavior.
+    (e.g. `(2, 3) * (4, 3, 5) -> (2, 4, 5)`)
+
+    # Examples
+    ```python
+        # Theano-like behavior example
+        >>> x = K.random_uniform_variable(shape=(2, 3), low=0, high=1)
+        >>> y = K.ones((4, 3, 5))
+        >>> xy = K.dot(x, y)
+        >>> K.int_shape(xy)
+        (2, 4, 5)
+    ```
+
+    # Numpy implementation
+    ```python
+        def dot(x, y):
+            return dot(x, y)
+    ```
+    """
+
+
+def test_doc_multiple_sections_code():
+    """ Checks that we can have code blocks in multiple sections."""
+    generated = autogen.process_docstring(dummy_docstring)
+    assert '# Theano-like behavior example' in generated
+    assert 'def dot(x, y):' in generated
+
+
+def test_docs_in_custom_destination_dir(tmpdir):
+    autogen.generate(tmpdir)
+    assert os.path.isdir(os.path.join(tmpdir, 'layers'))
+    assert os.path.isdir(os.path.join(tmpdir, 'models'))
+    assert os.path.isdir(os.path.join(tmpdir, 'examples'))
+    assert os.listdir(os.path.join(tmpdir, 'examples'))
+
+
+def test_module_name():
+    for page in autogen.PAGES:
+        list_of_classes = autogen.read_page_data(page, 'classes')
+        for element in list_of_classes:
+            if isinstance(element, (list, tuple)):
+                cls = element[0]
+            else:
+                cls = element
+            signature = autogen.get_class_signature(cls)
+            assert signature.startswith('keras.')
+
+        list_of_functions = autogen.read_page_data(page, 'functions')
+        for function_ in list_of_functions:
+            signature = autogen.get_function_signature(function_)
+            assert signature.startswith('keras.')
 
 
 if __name__ == '__main__':
